@@ -1,0 +1,48 @@
+#!/bin/bash
+
+#Assign values to the variables
+R1_reads=$1
+R2_reads=$2
+sample_name=$(basename $R1_reads _R1.fq.gz)
+output_folder="/home/student/day8_pipelines/output"
+ref_genome="/home/student/BTG/practical_resources_day4/practical_resources/SARS-CoV-2.reference.fasta"
+bed_file="/home/student/BTG/practical_resources_day4/practical_resources/artic_v3_ssi_v5.primer.bed"
+nextclade_ref_folder="/home/student/BTG/practical_resources_day4/practical_resources/nextclade_refdata"
+
+mkdir -p $output_folder
+#echo "This is the read pair, consisting of $R1_reads and $R2_reads"
+#echo "This is the sample name: $sample_name"
+#echo -e "This is the reference genomes:\n - BWA ref: $ref_genome\n - Nextclade ref folder: $nextclade_ref_folder"
+#echo "This is the trim bed file: $bed_file"
+
+# map read mates 1 and 2 to the ref genome
+bwa mem $ref_genome $R1_reads $R2_reads -o $output_folder/$sample_name.sam
+
+# generate a bam file and short it
+samtools view -b $output_folder/$sample_name.sam | samtools sort -o $output_folder/$sample_name.bam
+
+# trim primers from the sorted bam files 
+ivar trim -e -i $output_folder/$sample_name.bam -b $bed_file -m 30 -q 20 -p $output_folder/$sample_name.trimmed
+
+# sort the trimmed bam file 
+samtools sort $output_folder/$sample_name.trimmed.bam -o $output_folder/$sample_name.trimmed.sorted.bam
+
+# generate a file with gene variations between reads and ref genome
+bcftools mpileup -B -d 250 --max-idepth 1000 --annotate INFO/AD,FORMAT/AD -Q 30 -f $ref_genome $output_folder/$sample_name.trimmed.sorted.bam | 
+bcftools call -Ou -m | 
+bcftools +fill-tags -- -t FORMAT/VAF | 
+bcftools +setGT -- -t q -i 'GT="1/1" && FORMAT/VAF < 0.8' -n 'c:0/1' |
+bcftools +setGT -- -t q -i 'GT="0/1" && FORMAT/VAF >= 0.8' -n 'c:1/1' |
+bcftools filter -o $output_folder/$sample_name.vcf -e 'INFO/IMF < 0.5' --
+
+# compress the variant calling file
+bgzip -kf $output_folder/$sample_name.vcf # Automatically generates a .vcf.gz file
+
+# index the compressed variant calling file
+tabix -p vcf $output_folder/$sample_name.vcf.gz # Automatically generates a .vcf.gz.tbi file
+
+# assemble the genome from the consensus btw ix var call and ref gen
+bcftools consensus -a 'N' -p $sample_name -f $ref_genome -H I -i 'INFO/DP >= 10' $output_folder/$sample_name.vcf.gz > $output_folder/$sample_name.fasta
+
+#determine the lineage from the assembled genome
+nextclade run -D $nextclade_ref_folder $output_folder/$sample_name.fasta --output-tsv $output_folder/$sample_name.tsv
